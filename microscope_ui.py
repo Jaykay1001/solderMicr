@@ -15,7 +15,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QApplication, QMainWindow, QShortcut
 
-from microscope import Exposure, choose_mode, frame_duration, preview_size
+from microscope import CameraSession
 
 
 class FrameStatus:
@@ -26,6 +26,12 @@ class FrameStatus:
         self.metadata = {}
         self.timestamps = deque(maxlen=120)
         self.last_frame = time.monotonic()
+
+    def reset(self):
+        with self.lock:
+            self.metadata = {}
+            self.timestamps.clear()
+            self.last_frame = time.monotonic()
 
     def update(self, request):
         metadata = request.get_metadata()
@@ -46,20 +52,17 @@ class FrameStatus:
 
 
 class MicroscopeWindow(QMainWindow):
-    def __init__(self, camera, exposure, status, size, target_fps):
+    def __init__(self, session, status):
         super().__init__()
-        self.camera = camera
-        self.exposure = exposure
+        self.session = session
+        self.camera = session.camera
         self.status = status
-        self.target_fps = target_fps
+        self.notice = ""
+        self.preview = None
         self.overlay_visible = True
         self.setWindowTitle("Soldering microscope")
         self.resize(1100, 820)
-        self.preview = QGlPicamera2(camera, width=1100, height=820, keep_ar=True,
-                                   bg_colour=(0, 0, 0))
-        self.setCentralWidget(self.preview)
-        # The overlay is a separate GL texture; camera pixels stay in DMA buffers.
-        self.overlay_size = (1000, max(100, round(1000 * size[1] / size[0])))
+        self.attach_preview()
         try:
             self.font = ImageFont.truetype("DejaVuSans.ttf", 19)
         except OSError:
@@ -68,6 +71,10 @@ class MicroscopeWindow(QMainWindow):
         for key, action in (("+", "gain_up"), ("=", "gain_up"), ("-", "gain_down"),
                             ("Up", "exposure_up"), ("Down", "exposure_down"), ("A", "auto")):
             self.bind(key, lambda action=action: self.adjust(action))
+        self.bind("Z", lambda: self.adjust_zoom(1))
+        self.bind("X", lambda: self.adjust_zoom(-1))
+        self.bind("R", lambda: self.adjust_zoom(0))
+        self.bind("D", self.toggle_profile)
         self.bind("F", self.toggle_fullscreen)
         self.bind("H", self.toggle_overlay)
         self.bind("Escape", self.close)
@@ -75,10 +82,46 @@ class MicroscopeWindow(QMainWindow):
         self.timer.timeout.connect(lambda: self.guard(self.refresh_overlay))
         self.timer.start(250)
 
+    @property
+    def exposure(self):
+        return self.session.exposure
+
+    def attach_preview(self):
+        self.status.reset()
+        self.preview = QGlPicamera2(self.camera, width=1100, height=820, keep_ar=True,
+                                   bg_colour=(0, 0, 0))
+        self.setCentralWidget(self.preview)
+        width, height = self.session.size
+        self.overlay_size = (1000, max(160, round(1000 * height / width)))
+
+    def detach_preview(self):
+        widget = self.takeCentralWidget()
+        self.preview = None
+        if widget is not None:
+            # Release textures and held camera buffers before reconfiguration.
+            widget.close()
+            widget.deleteLater()
+
+    def adjust_zoom(self, direction):
+        self.camera.set_controls(self.session.zoom.change(direction))
+        self.notice = ""
+        self.refresh_overlay()
+
+    def toggle_profile(self):
+        self.timer.stop()
+        try:
+            profile = "detail" if self.session.profile == "fast" else "fast"
+            self.notice = self.session.switch_profile(profile, self.detach_preview, self.attach_preview)
+            if self.notice:
+                print(self.notice, file=sys.stderr)
+            self.refresh_overlay()
+        finally:
+            self.timer.start(250)
+
     def bind(self, key, callback):
         shortcut = QShortcut(QKeySequence(key), self)
         shortcut.setContext(Qt.WindowShortcut)
-        shortcut.setAutoRepeat(key in ("+", "=", "-", "Up", "Down"))
+        shortcut.setAutoRepeat(key in ("+", "=", "-", "Up", "Down", "Z", "X"))
         shortcut.activated.connect(lambda: self.guard(callback))
         self.shortcuts.append(shortcut)
 
@@ -106,30 +149,45 @@ class MicroscopeWindow(QMainWindow):
             self.refresh_overlay()
 
     def refresh_overlay(self):
-        if not self.overlay_visible:
+        if not self.overlay_visible or self.preview is None:
             return
         metadata, fps, age = self.status.snapshot()
         gain = metadata.get("AnalogueGain", 0)
         exposure_ms = metadata.get("ExposureTime", 0) / 1000
         mode = "AUTO" if self.exposure.auto else "MANUAL"
         first = (f"{mode}   Gain {gain:.2f}x   Exposure {exposure_ms:.2f} ms   "
-                 f"Camera {fps:.1f} fps / target {self.target_fps:.1f}")
+                 f"Camera {fps:.1f} fps / target {self.session.target_fps:.1f}")
         if age > 2:
             first = "Waiting for camera frames - check the terminal if this persists"
         elif not metadata:
             first = "Starting camera..."
-        second = "+/- gain   Up/Down exposure   A auto/manual   F fullscreen   H hide   Esc quit"
-        # Use three short lines so the controls remain readable at ordinary sizes.
+        zoom = self.session.zoom
+        applied = zoom.applied_factor(metadata)
+        applied_text = f"{applied:.2f}x" if applied is not None else "pending"
+        sensor_width, sensor_height = self.session.mode["size"]
+        width, height = self.session.size
+        second = (f"{self.session.label}   Sensor {sensor_width}x{sensor_height}   "
+                  f"Preview {width}x{height}   Zoom {applied_text} (set {zoom.factor:.2f}x)")
+        requested = "Automatic exposure"
+        if not self.exposure.auto:
+            requested = (f"Requested: {self.exposure.gain:.2f}x gain, "
+                         f"{self.exposure.exposure_us / 1000:.2f} ms")
+        if self.notice:
+            requested = "Mode switch failed; previous mode restored. See terminal."
+        # Only the overlay texture is copied; camera images stay in DMA buffers.
         image = Image.new("RGBA", self.overlay_size)
         draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, self.overlay_size[0], 86), fill=(0, 0, 0, 185))
-        draw.text((10, 7), first, font=self.font, fill="white")
-        if not self.exposure.auto:
-            requested = (f"Requested: {self.exposure.gain:.2f}x, "
-                         f"{self.exposure.exposure_us / 1000:.2f} ms")
-            draw.text((10, 32), requested, font=self.font, fill="#ffdd88")
-        draw.text((10, 59), second, font=self.font, fill="white")
+        draw.rectangle((0, 0, self.overlay_size[0], 138), fill=(0, 0, 0, 185))
+        for y, text, colour in (
+            (7, first, "white"),
+            (33, second, "white"),
+            (59, requested, "#ffdd88"),
+            (85, "+/- gain   Up/Down exposure   A auto/manual   Z/X zoom   R reset", "white"),
+            (111, "D fast/detail   F fullscreen   H hide   Esc quit", "white"),
+        ):
+            draw.text((10, y), text, font=self.font, fill=colour)
         self.preview.set_overlay(np.asarray(image))
+
 
 
 def run(args):
@@ -139,31 +197,13 @@ def run(args):
     old_signals = {}
     try:
         camera = Picamera2(args.camera)
-        index, mode = choose_mode(camera.sensor_modes, args.fps, args.mode)
-        size = preview_size(mode["size"], args.width)
-        config = camera.create_preview_configuration(
-            main={"size": size, "format": "XRGB8888"},
-            sensor={"output_size": mode["size"], "bit_depth": mode["bit_depth"]},
-            raw=None, buffer_count=args.buffers, queue=False,
-        )
-        camera.configure(config)
-        duration = frame_duration(args.fps, mode["fps"], camera.camera_controls["FrameDurationLimits"])
-        exposure = Exposure.from_controls(camera.camera_controls, duration)
-        initial = {"FrameDurationLimits": (duration, duration), "AeEnable": True}
-        if "NoiseReductionMode" in camera.camera_controls:
-            initial["NoiseReductionMode"] = controls.draft.NoiseReductionModeEnum.Off
-        camera.set_controls(initial)
-        target_fps = 1_000_000 / duration
-        size = camera.camera_configuration()["main"]["size"]
-        print(f"Sensor mode {index}: {mode['size']}, {mode['bit_depth']} bit, "
-              f"maximum {mode['fps']:.2f} fps; preview {size}, target {target_fps:.2f} fps, "
-              f"{args.buffers} buffers.", flush=True)
-        if target_fps < args.fps * 0.99:
-            print("Requested frame rate exceeds this mode's limits; using the supported rate.", flush=True)
-        print("+/- gain | Up/Down exposure | A auto/manual | F fullscreen | H overlay | Esc quit", flush=True)
+        session = CameraSession(camera, args, controls.draft.NoiseReductionModeEnum.Off)
+        session.configure(args.profile)
+        print("+/- gain | Up/Down exposure | A auto/manual | Z/X zoom | R reset | "
+              "D fast/detail | F fullscreen | H overlay | Esc quit", flush=True)
         status = FrameStatus()
         camera.post_callback = status.update
-        window = MicroscopeWindow(camera, exposure, status, size, target_fps)
+        window = MicroscopeWindow(session, status)
         window.showNormal() if args.windowed else window.showFullScreen()
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_signals[signum] = signal.signal(signum, lambda *_: app.quit())
@@ -180,6 +220,6 @@ def run(args):
             finally:
                 try:
                     if window is not None:
-                        window.preview.close()
+                        window.detach_preview()
                 finally:
                     camera.close()

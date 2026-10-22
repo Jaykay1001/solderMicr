@@ -1,0 +1,9 @@
+# Install the Raspberry Pi OS apt packages in README.md first.
+# libcamera and the Pi camera stack require system packages.
+# Use a venv created with /usr/bin/python3 -m venv --system-site-packages.
+# Versions are intentionally unpinned to accept the matched OS packages.
+picamera2
+numpy
+Pillow
+PyOpenGL
+PyQt5

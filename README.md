@@ -21,8 +21,22 @@ sudo apt install python3-picamera2 python3-pyqt5 python3-opengl python3-numpy py
 
 Copy or clone this repository onto the Pi, then open a terminal in its directory.
 Use the distribution's Python (`/usr/bin/python3`), since camera bindings and
-GUI dependencies are installed through apt. A virtual environment is unnecessary;
-if you use one, create it with `--system-site-packages`.
+GUI dependencies are installed through apt. A virtual environment is unnecessary.
+Python dependencies are also listed in [requirements.txt](requirements.txt). To
+use that file in a virtual environment, install the apt packages above first, then:
+
+```bash
+sudo apt install python3-venv
+/usr/bin/python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python microscope.py
+```
+
+The system packages provide the Raspberry Pi camera bindings, including libcamera;
+`requirements.txt` alone cannot install the complete camera stack. Versions are
+intentionally unpinned so the environment can reuse the matched Raspberry Pi OS
+packages. The remaining examples use the system Python; substitute
+`.venv/bin/python` when using the virtual environment.
 
 Check detection before launching:
 
@@ -49,28 +63,70 @@ proportions. Focus and aperture are adjusted on your lens.
 | `-` | Decrease analogue gain by one third of a stop |
 | Up / Down | Increase / decrease exposure time by one third of a stop |
 | `A` | Toggle automatic / manual exposure and gain |
+| `Z` / `X` | Zoom in / out around the image centre |
+| `R` | Reset zoom to 1x |
+| `D` | Switch between fast and detail capture profiles |
 | `F` | Toggle fullscreen |
 | `H` | Hide / show the status overlay |
 | Escape | Quit and release the camera |
 
-Click the window if another application has keyboard focus. Holding the gain or
-exposure keys repeats adjustments. Ctrl+C in the launching terminal also exits.
+Click the window if another application has keyboard focus. Holding the gain,
+exposure, or zoom keys repeats adjustments. Ctrl+C in the launching terminal also exits.
 
 Adjusting gain or exposure switches both controls to manual. It starts from the
 latest applied settings, then applies the requested adjustment. Press `A` to
 restore automatic exposure. White balance remains automatic in both modes.
 
-The overlay shows **applied analogue gain, applied exposure, and camera fps**.
+The overlay shows **applied analogue gain, applied exposure, camera fps, capture
+profile, sensor/preview resolutions, and applied/requested zoom**.
 In manual mode it also shows the requested values. The sensor may take several
 frames to apply changes, and values can be rounded by the driver. Gain is shown
 as a multiplier, not a calibrated ISO number: higher gain brightens the image
 but increases noise. Camera fps comes from sensor timestamps, not monitor
 presentation timing or a latency measurement.
 
+## Zoom and inspection mode
+
+`Z` zooms in, `X` zooms out, and `R` restores the full view of the current mode.
+Zoom is centred, with four steps per doubling, from 1x to 4x (or the camera's
+crop limit, if lower). Position the board so the area of interest is in the centre.
+The camera's `ScalerCrop` control crops the sensor image **before** scaling it
+into the preview; Python never crops or enlarges camera frames itself.
+
+`D` toggles between two profiles:
+
+- **FAST:** the original low-latency configuration, targeting 60 fps by default.
+  Digital zoom enlarges what this sensor mode captures; it cannot recover detail
+  absent from that readout.
+- **DETAIL:** the largest available sensor readout, accepting its lower frame
+  rate. On the HQ camera this uses its full 4056 x 3040 sensor mode. The crop has
+  more source pixels available before scaling, which helps inspection at higher
+  zoom. The terminal and overlay report the actual frame-rate target.
+
+The output preview width remains capped by `--width` in both profiles. Detail
+mode therefore does not send a full-resolution image through the display path:
+its extra sensor pixels are available for cropping upstream. Zoom beyond the
+available source detail still requires enlargement; it is not optical zoom.
+
+Switching profiles briefly pauses capture and resets zoom to 1x. Field of view
+can change because different sensor modes read different areas. Manual gain and
+exposure are preserved, clamped to the new mode's limits; automatic exposure
+stays automatic. If switching fails, the app attempts to restore the previous
+profile and zoom and prints the error in the terminal.
+
+Start directly in inspection mode with:
+
+```bash
+/usr/bin/python3 microscope.py --profile detail
+```
+
+`--mode N` customises the fast profile, labelled **CUSTOM** in the overlay; `D`
+then switches between that custom mode and the largest-resolution detail mode.
+
 ## Frame rate and image size
 
-At startup the application queries available sensor modes and chooses the
-smallest readout that meets the requested fps. If none does, it chooses the
+At startup the application queries available sensor modes. The default **fast**
+profile chooses the smallest readout that meets the requested fps. If none does, it chooses the
 fastest available mode and reports the reduced target in the terminal.
 It explicitly configures the selected sensor mode; merely reducing the preview
 size would not necessarily increase the sensor's frame rate.
@@ -136,7 +192,12 @@ On the Pi, verify:
 3. Holding Up stops increasing exposure at the frame budget without lowering fps.
 4. Fullscreen, overlay hiding, Escape, and Ctrl+C work. Restarting immediately
    after quitting successfully reacquires the camera.
-5. Moving a tool under the lens feels responsive. To estimate end-to-end latency,
+5. Hold `Z` and `X` to check zoom stops at its limits, keeps the same centre,
+   and does not distort the picture. `R` should restore the original view.
+6. Press `D` in automatic and manual exposure modes. Confirm the sensor size and
+   fps target change, zoom resets, and switching back restores the fast preview.
+   Check `H`, fullscreen, and quitting after several mode switches.
+7. Moving a tool under the lens feels responsive in the fast profile. To estimate end-to-end latency,
    film a blinking LED and its monitor image together with a high-frame-rate
    external camera, and compare the transition times over several cycles. If the
    monitor offers a low-latency or game mode, compare that setting too.
@@ -146,7 +207,8 @@ or display timing. Those require the hardware check above.
 
 ## Local checks
 
-The mode-selection and exposure-control tests use only Python's standard library:
+The mode-selection, exposure, zoom-geometry, and simulated mode-switch lifecycle
+tests use only Python's standard library:
 
 ```bash
 python3 -m unittest discover -s tests -v
