@@ -9,13 +9,13 @@ from collections import deque
 import numpy as np
 from libcamera import controls
 from picamera2 import Picamera2
-from picamera2.previews.qt import QGlPicamera2
 from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QApplication, QMainWindow, QShortcut
 
 from microscope import CameraSession
+from microscope_preview import create_preview
 
 
 class FrameStatus:
@@ -59,6 +59,7 @@ class MicroscopeWindow(QMainWindow):
         self.status = status
         self.notice = ""
         self.preview = None
+        self.rotation = 0
         self.overlay_visible = True
         self.setWindowTitle("Soldering microscope")
         self.resize(1100, 820)
@@ -74,6 +75,7 @@ class MicroscopeWindow(QMainWindow):
         self.bind("Z", lambda: self.adjust_zoom(1))
         self.bind("X", lambda: self.adjust_zoom(-1))
         self.bind("R", lambda: self.adjust_zoom(0))
+        self.bind("T", self.rotate_image)
         self.bind("D", self.toggle_profile)
         self.bind("F", self.toggle_fullscreen)
         self.bind("H", self.toggle_overlay)
@@ -88,8 +90,7 @@ class MicroscopeWindow(QMainWindow):
 
     def attach_preview(self):
         self.status.reset()
-        self.preview = QGlPicamera2(self.camera, width=1100, height=820, keep_ar=True,
-                                   bg_colour=(0, 0, 0))
+        self.preview = create_preview(self.camera, self.session.size, self.rotation)
         self.setCentralWidget(self.preview)
         width, height = self.session.size
         self.overlay_size = (1000, max(160, round(1000 * height / width)))
@@ -105,6 +106,11 @@ class MicroscopeWindow(QMainWindow):
     def adjust_zoom(self, direction):
         self.camera.set_controls(self.session.zoom.change(direction))
         self.notice = ""
+        self.refresh_overlay()
+
+    def rotate_image(self):
+        self.preview.rotate()
+        self.rotation = self.preview.rotation
         self.refresh_overlay()
 
     def toggle_profile(self):
@@ -174,6 +180,7 @@ class MicroscopeWindow(QMainWindow):
                          f"{self.exposure.exposure_us / 1000:.2f} ms")
         if self.notice:
             requested = "Mode switch failed; previous mode restored. See terminal."
+        requested += f"   Rotation {self.rotation} deg"
         # Only the overlay texture is copied; camera images stay in DMA buffers.
         image = Image.new("RGBA", self.overlay_size)
         draw = ImageDraw.Draw(image)
@@ -183,7 +190,7 @@ class MicroscopeWindow(QMainWindow):
             (33, second, "white"),
             (59, requested, "#ffdd88"),
             (85, "+/- gain   Up/Down exposure   A auto/manual   Z/X zoom   R reset", "white"),
-            (111, "D fast/detail   F fullscreen   H hide   Esc quit", "white"),
+            (111, "T rotate 90 CW   D fast/detail   F fullscreen   H hide   Esc quit", "white"),
         ):
             draw.text((10, y), text, font=self.font, fill=colour)
         self.preview.set_overlay(np.asarray(image))
@@ -200,7 +207,7 @@ def run(args):
         session = CameraSession(camera, args, controls.draft.NoiseReductionModeEnum.Off)
         session.configure(args.profile)
         print("+/- gain | Up/Down exposure | A auto/manual | Z/X zoom | R reset | "
-              "D fast/detail | F fullscreen | H overlay | Esc quit", flush=True)
+              "T rotate 90 CW | D fast/detail | F fullscreen | H overlay | Esc quit", flush=True)
         status = FrameStatus()
         camera.post_callback = status.update
         window = MicroscopeWindow(session, status)

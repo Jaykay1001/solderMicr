@@ -65,6 +65,7 @@ proportions. Focus and aperture are adjusted on your lens.
 | `A` | Toggle automatic / manual exposure and gain |
 | `Z` / `X` | Zoom in / out around the image centre |
 | `R` | Reset zoom to 1x |
+| `T` | Rotate the live image 90° clockwise |
 | `D` | Switch between fast and detail capture profiles |
 | `F` | Toggle fullscreen |
 | `H` | Hide / show the status overlay |
@@ -84,6 +85,11 @@ frames to apply changes, and values can be rounded by the driver. Gain is shown
 as a multiplier, not a calibrated ISO number: higher gain brightens the image
 but increases noise. Camera fps comes from sensor timestamps, not monitor
 presentation timing or a latency measurement.
+
+Press `T` to cycle through 0°, 90°, 180°, and 270° clockwise. Rotation is applied
+on the GPU while capture continues. The image keeps its proportions with black
+borders where needed, and the status overlay stays upright. The selected angle
+is preserved when switching capture profiles; restarting the app returns to 0°.
 
 ## Zoom and inspection mode
 
@@ -197,6 +203,9 @@ On the Pi, verify:
 6. Press `D` in automatic and manual exposure modes. Confirm the sensor size and
    fps target change, zoom resets, and switching back restores the fast preview.
    Check `H`, fullscreen, and quitting after several mode switches.
+   Press `T` four times to check clockwise rotation returns to the original view
+   without stretching or cropping. Check rotation with the overlay hidden and
+   confirm the angle persists across `D` profile switches.
 7. Moving a tool under the lens feels responsive in the fast profile. To estimate end-to-end latency,
    film a blinking LED and its monitor image together with a high-frame-rate
    external camera, and compare the transition times over several cycles. If the
@@ -207,12 +216,12 @@ or display timing. Those require the hardware check above.
 
 ## Local checks
 
-The mode-selection, exposure, zoom-geometry, and simulated mode-switch lifecycle
-tests use only Python's standard library:
+The mode-selection, exposure, zoom-geometry, rotation/viewport, and simulated
+mode-switch lifecycle tests use only Python's standard library:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile microscope.py microscope_ui.py
+python3 -m py_compile microscope.py microscope_ui.py microscope_preview.py
 ```
 
 ## References
